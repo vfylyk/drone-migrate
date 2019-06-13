@@ -51,6 +51,14 @@ func MigrateRegistries(source, target *sql.DB) error {
 		log.Debugln("prepare complete")
 	}
 
+	var sequence int64
+	var lastSecret SecretV1
+	if err := meddler.QueryRow(target, &lastSecret, registryLastSecretQuery); err != nil {
+		logrus.WithError(err).Errorln("failed to find secrets sequence number")
+		return err
+	}
+	sequence = lastSecret.ID + 1
+
 	for repoFullname, dockerConfig := range dockerConfigs {
 		log := logrus.WithFields(logrus.Fields{
 			"repo": repoFullname,
@@ -73,11 +81,13 @@ func MigrateRegistries(source, target *sql.DB) error {
 		}
 
 		secretV1 := &SecretV1{
+			ID:          sequence,
 			RepoID:      repoV1.ID,
 			Name:        ".dockerconfigjson",
 			Data:        string(result),
 			PullRequest: true,
 		}
+		sequence++
 
 		if err := meddler.Insert(tx, "secrets", secretV1); err != nil {
 			log.WithError(err).Errorln("migration failed")
@@ -85,6 +95,14 @@ func MigrateRegistries(source, target *sql.DB) error {
 		}
 
 		log.Debugln("migration complete")
+	}
+
+	if meddler.Default == meddler.PostgreSQL {
+		_, err = tx.Exec(fmt.Sprintf(updateSecretsSeq, sequence+1))
+		if err != nil {
+			logrus.WithError(err).Errorln("failed to reset sequence")
+			return err
+		}
 	}
 
 	logrus.Infof("migration complete")
@@ -97,4 +115,10 @@ SELECT
 	registry.*
 FROM registry INNER JOIN repos ON (repo_id = registry_repo_id)
 WHERE repo_user_id > 0
+`
+
+const registryLastSecretQuery = `
+SELECT 
+	MAX(secret_id) AS secret_id 
+FROM secrets
 `
